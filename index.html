@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera nhà</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#262b36; --text:#e8eaed; --muted:#8b93a1; --accent:#4f8cff; --danger:#ff5c5c; --ok:#3ecf8e; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; min-height:100vh; display:flex; justify-content:center; padding:16px; }
+  .wrap { width:100%; max-width:720px; }
+  h1 { font-size:20px; margin:8px 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  input[type=email], input[type=password] { width:100%; padding:12px; margin-bottom:10px; background:var(--bg); border:1px solid var(--line); border-radius:10px; color:var(--text); font-size:16px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:12px 16px; font-size:15px; cursor:pointer; }
+  button.secondary { background:#262b36; }
+  button.live-on { background:var(--danger); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  .viewer { position:relative; background:#000; border-radius:12px; overflow:hidden; aspect-ratio:4/3; display:flex; align-items:center; justify-content:center; }
+  .viewer img { width:100%; height:100%; object-fit:contain; display:block; }
+  .viewer .empty { color:var(--muted); font-size:14px; }
+  .badge { position:absolute; top:10px; left:10px; background:rgba(0,0,0,.6); padding:4px 10px; border-radius:99px; font-size:12px; display:none; }
+  .badge.show { display:block; }
+  .badge::before { content:"● "; color:var(--danger); }
+  .meta { color:var(--muted); font-size:13px; margin-top:10px; }
+  label.chk { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:14px; }
+  .err { color:var(--danger); font-size:14px; min-height:20px; margin-top:6px; }
+  .spacer { flex:1; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📷 Camera nhà</h1>
+
+  <!-- Đăng nhập -->
+  <div id="loginBox" class="card">
+    <input id="email" type="email" placeholder="Email" autocomplete="username">
+    <input id="pass" type="password" placeholder="Mật khẩu" autocomplete="current-password">
+    <button id="loginBtn">Đăng nhập</button>
+    <div id="loginErr" class="err"></div>
+  </div>
+
+  <!-- Giao diện camera -->
+  <div id="camBox" class="card hidden">
+    <div class="viewer">
+      <div id="empty" class="empty">Chưa có ảnh. Bấm “Chụp ngay”.</div>
+      <img id="frame" class="hidden" alt="Ảnh từ camera">
+      <div id="liveBadge" class="badge">LIVE</div>
+    </div>
+    <div class="meta" id="meta">—</div>
+    <div class="row">
+      <button id="snapBtn">Chụp ngay</button>
+      <button id="liveBtn" class="secondary">Bật live</button>
+      <label class="chk"><input type="checkbox" id="flash"> Đèn flash</label>
+      <span class="spacer"></span>
+      <button id="saveBtn" class="secondary">Lưu ảnh</button>
+      <button id="logoutBtn" class="secondary">Đăng xuất</button>
+    </div>
+    <div class="meta">Live chỉ gửi khoảng 1 ảnh / 1–3 giây và tự tắt sau 5 phút (hoặc khi đóng trang).</div>
+  </div>
+</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+  import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut }
+    from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+  import { getDatabase, ref, onValue, set, onDisconnect }
+    from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
+
+  // ======== DÁN firebaseConfig CỦA BẠN VÀO ĐÂY ========
+  const firebaseConfig = {
+    apiKey: "AIzaSy...",
+    authDomain: "TEN-DU-AN.firebaseapp.com",
+    databaseURL: "https://TEN-DU-AN-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "TEN-DU-AN",
+    appId: "1:000000000000:web:xxxxxxxx"
+  };
+  // =====================================================
+
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getDatabase(app);
+  const $ = id => document.getElementById(id);
+
+  let lastTs = 0, liveState = false, currentSrc = "";
+  let unsubFrame = null, unsubCmd = null;
+
+  $("loginBtn").onclick = async () => {
+    $("loginErr").textContent = "";
+    try {
+      await signInWithEmailAndPassword(auth, $("email").value.trim(), $("pass").value);
+    } catch (e) {
+      $("loginErr").textContent = "Đăng nhập thất bại: " + (e.code || e.message);
+    }
+  };
+  $("pass").addEventListener("keydown", e => { if (e.key === "Enter") $("loginBtn").click(); });
+  $("logoutBtn").onclick = () => signOut(auth);
+
+  onAuthStateChanged(auth, user => {
+    $("loginBox").classList.toggle("hidden", !!user);
+    $("camBox").classList.toggle("hidden", !user);
+    if (unsubFrame) { unsubFrame(); unsubFrame = null; }
+    if (unsubCmd)   { unsubCmd();   unsubCmd = null; }
+    if (!user) return;
+
+    unsubFrame = onValue(ref(db, "cam/frame"), snap => {
+      const v = snap.val();
+      if (!v || !v.img) return;
+      currentSrc = "data:image/jpeg;base64," + v.img;
+      $("frame").src = currentSrc;
+      $("frame").classList.remove("hidden");
+      $("empty").classList.add("hidden");
+      lastTs = v.ts || Date.now();
+      renderMeta();
+    }, err => { $("meta").textContent = "Không đọc được dữ liệu: " + err.message; });
+
+    unsubCmd = onValue(ref(db, "cam/cmd"), snap => {
+      const c = snap.val() || {};
+      liveState = !!c.live;
+      $("flash").checked = !!c.flash;
+      $("liveBtn").textContent = liveState ? "Tắt live" : "Bật live";
+      $("liveBtn").classList.toggle("live-on", liveState);
+      $("liveBadge").classList.toggle("show", liveState);
+    });
+  });
+
+  function renderMeta() {
+    if (!lastTs) { $("meta").textContent = "—"; return; }
+    const sec = Math.max(0, Math.round((Date.now() - lastTs) / 1000));
+    const ago = sec < 60 ? sec + " giây trước" : sec < 3600 ? Math.floor(sec / 60) + " phút trước" : Math.floor(sec / 3600) + " giờ trước";
+    $("meta").textContent = "Ảnh lúc " + new Date(lastTs).toLocaleString("vi-VN") + " (" + ago + ")";
+  }
+  setInterval(renderMeta, 1000);
+
+  $("snapBtn").onclick = async () => {
+    $("snapBtn").disabled = true;
+    await set(ref(db, "cam/cmd/snap"), Date.now());
+    setTimeout(() => $("snapBtn").disabled = false, 4000);
+  };
+
+  $("liveBtn").onclick = async () => {
+    const next = !liveState;
+    if (next) onDisconnect(ref(db, "cam/cmd/live")).set(false);  // đóng trang thì tự tắt live
+    await set(ref(db, "cam/cmd/live"), next);
+  };
+
+  $("flash").onchange = e => set(ref(db, "cam/cmd/flash"), e.target.checked);
+
+  $("saveBtn").onclick = () => {
+    if (!currentSrc) return;
+    const a = document.createElement("a");
+    a.href = currentSrc;
+    a.download = "cam-" + new Date(lastTs).toISOString().replace(/[:.]/g, "-") + ".jpg";
+    a.click();
+  };
+</script>
+</body>
+</html>
