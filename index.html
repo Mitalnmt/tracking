@@ -271,19 +271,35 @@
     }
     setInterval(renderMeta, 1000);
 
-    $("snapBtn").onclick = async () => {
-      $("snapBtn").disabled = true;
-      await set(ref(db, "cam/cmd/snap"), Date.now());
-      setTimeout(() => $("snapBtn").disabled = false, 4000);
-    };
+    async function runDbAction(action, button, successText) {
+      if (button) button.disabled = true;
+      try {
+        await action();
+        if (successText) $("meta").textContent = successText;
+      } catch (error) {
+        const detail = error?.code || error?.message || String(error);
+        $("meta").textContent = "Lỗi Firebase: " + detail;
+        console.error("Firebase operation failed:", error);
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
 
-    $("liveBtn").onclick = async () => {
+    $("snapBtn").onclick = () => runDbAction(
+      () => set(ref(db, "cam/cmd/snap"), Date.now()),
+      $("snapBtn"),
+      "Đã gửi lệnh chụp."
+    );
+
+    $("liveBtn").onclick = () => runDbAction(async () => {
       const next = !liveState;
-      if (next) onDisconnect(ref(db, "cam/cmd/live")).set(false);  // đóng trang thì tự tắt live
+      if (next) await onDisconnect(ref(db, "cam/cmd/live")).set(false);
       await set(ref(db, "cam/cmd/live"), next);
-    };
+    }, $("liveBtn"));
 
-    $("flash").onchange = e => set(ref(db, "cam/cmd/flash"), e.target.checked);
+    $("flash").onchange = e => runDbAction(
+      () => set(ref(db, "cam/cmd/flash"), e.target.checked)
+    );
 
     $("saveBtn").onclick = () => {
       if (!currentSrc) return;
